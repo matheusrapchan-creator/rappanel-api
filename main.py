@@ -130,6 +130,25 @@ class EstoqueMovimentacao(Base):
     criado_em: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Recebimento(Base):
+    __tablename__ = "recebimentos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cliente: Mapped[str] = mapped_column(String(150))
+    valor: Mapped[float] = mapped_column(Numeric(12, 2))
+    status: Mapped[str] = mapped_column(String(50), default="a receber")
+    vencimento: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    origem: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    agenda_id: Mapped[Optional[int]] = mapped_column(ForeignKey("agenda.id"), nullable=True)
+    orcamento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("orcamentos.id"), nullable=True)
+    projeto_id: Mapped[Optional[int]] = mapped_column(ForeignKey("projetos.id"), nullable=True)
+    cobrado_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    recebido_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    observacao: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    criado_em: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    atualizado_em: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class AgendaIn(BaseModel):
     titulo: str
     tipo: Optional[str] = None
@@ -259,6 +278,34 @@ class EstoqueMovimentacaoIn(BaseModel):
     observacao: Optional[str] = None
 
 
+class RecebimentoIn(BaseModel):
+    cliente: str
+    valor: float
+    status: str = "a receber"
+    vencimento: Optional[date] = None
+    origem: Optional[str] = None
+    agenda_id: Optional[int] = None
+    orcamento_id: Optional[int] = None
+    projeto_id: Optional[int] = None
+    cobrado_em: Optional[datetime] = None
+    recebido_em: Optional[datetime] = None
+    observacao: Optional[str] = None
+
+
+class RecebimentoUpdate(BaseModel):
+    cliente: Optional[str] = None
+    valor: Optional[float] = None
+    status: Optional[str] = None
+    vencimento: Optional[date] = None
+    origem: Optional[str] = None
+    agenda_id: Optional[int] = None
+    orcamento_id: Optional[int] = None
+    projeto_id: Optional[int] = None
+    cobrado_em: Optional[datetime] = None
+    recebido_em: Optional[datetime] = None
+    observacao: Optional[str] = None
+
+
 def require_token(x_api_token: Optional[str]):
     if x_api_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -308,6 +355,16 @@ def normalize_tipo_movimentacao(tipo: str):
         normalized = "saida"
     if normalized not in {"entrada", "saida", "ajuste"}:
         raise HTTPException(status_code=400, detail="Tipo deve ser entrada, saida ou ajuste")
+    return normalized
+
+
+def normalize_status_recebimento(status: str):
+    normalized = status.strip().lower()
+    if normalized not in {"a receber", "cobrado", "parcial", "recebido", "atrasado", "cancelado"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Status deve ser a receber, cobrado, parcial, recebido, atrasado ou cancelado",
+        )
     return normalized
 
 
@@ -598,3 +655,69 @@ async def movimentar_estoque(item_id: int, payload: EstoqueMovimentacaoIn, x_api
             "item": serialize(item),
             "movimentacao": serialize_movimentacao(movimento, item.nome, item.unidade),
         }
+
+
+@app.get("/recebimentos")
+async def listar_recebimentos(x_api_token: Optional[str] = Header(None)):
+    require_token(x_api_token)
+    async with SessionLocal() as session:
+        result = await session.execute(select(Recebimento).order_by(Recebimento.id.desc()))
+        return [serialize(item) for item in result.scalars().all()]
+
+
+@app.post("/recebimentos")
+async def criar_recebimento(payload: RecebimentoIn, x_api_token: Optional[str] = Header(None)):
+    require_token(x_api_token)
+    async with SessionLocal() as session:
+        data = payload.model_dump()
+        data["status"] = normalize_status_recebimento(data["status"])
+        if data["status"] in {"cobrado", "parcial"} and data.get("cobrado_em") is None:
+            data["cobrado_em"] = datetime.utcnow()
+        if data["status"] == "recebido" and data.get("recebido_em") is None:
+            data["recebido_em"] = datetime.utcnow()
+
+        item = Recebimento(**data)
+        session.add(item)
+        await session.commit()
+        await session.refresh(item)
+        return serialize(item)
+
+
+@app.get("/recebimentos/{item_id}")
+async def obter_recebimento(item_id: int, x_api_token: Optional[str] = Header(None)):
+    require_token(x_api_token)
+    async with SessionLocal() as session:
+        item = await get_or_404(session, Recebimento, item_id)
+        return serialize(item)
+
+
+@app.patch("/recebimentos/{item_id}")
+async def atualizar_recebimento(item_id: int, payload: RecebimentoUpdate, x_api_token: Optional[str] = Header(None)):
+    require_token(x_api_token)
+    async with SessionLocal() as session:
+        item = await get_or_404(session, Recebimento, item_id)
+        changes = payload.model_dump(exclude_unset=True)
+        if "status" in changes:
+            changes["status"] = normalize_status_recebimento(changes["status"])
+            if changes["status"] in {"cobrado", "parcial"} and item.cobrado_em is None and changes.get("cobrado_em") is None:
+                changes["cobrado_em"] = datetime.utcnow()
+            if changes["status"] == "recebido" and changes.get("recebido_em") is None:
+                changes["recebido_em"] = datetime.utcnow()
+
+        for key, value in changes.items():
+            setattr(item, key, value)
+        item.atualizado_em = datetime.utcnow()
+
+        await session.commit()
+        await session.refresh(item)
+        return serialize(item)
+
+
+@app.delete("/recebimentos/{item_id}")
+async def deletar_recebimento(item_id: int, x_api_token: Optional[str] = Header(None)):
+    require_token(x_api_token)
+    async with SessionLocal() as session:
+        item = await get_or_404(session, Recebimento, item_id)
+        await session.delete(item)
+        await session.commit()
+        return {"deleted": True, "id": item_id}
